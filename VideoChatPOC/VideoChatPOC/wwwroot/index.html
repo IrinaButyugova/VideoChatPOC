@@ -1,1 +1,223 @@
-﻿
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Video chat</title>
+</head>
+<body>
+    <div class="container">
+        <input id="startBtn" type="button" value="Start call" />
+        <input id="stopBtn" type="button" value="Stop call" disabled />
+        <div>
+            <video id="receivedVideo" autoplay></video>
+        </div>
+    </div>
+
+    <script src="js/microsoft/signalr/dist/browser/signalr.min.js"></script>
+    <script src="js/adapter.js"></script>
+    <script>
+        const hubConnection = new signalR.HubConnectionBuilder()
+            .withUrl("/chat")
+            .build();
+        hubConnection.start();
+
+        hubConnection.on("Signaling", function (message){
+            var messageJson = JSON.parse(message);
+
+            switch (messageJson.type) {
+                case "video-offer":
+                    handleVideoOfferMessage(messageJson);
+                    break;
+                case "video-answer":
+                    handleVideoAnswerMessage(messageJson);
+                    break;
+                case "new-ice-candidate":
+                    handleNewICECandidateMessage(messageJson);
+                    break;
+                case "stop":
+                    handleStopMessage(messageJson);
+                    break;
+            }
+        });
+
+        var mediaConstraints = {
+            audio: true,
+            video: true
+        };
+        var myPeerConnection = null;
+        var transceiver = null;
+
+        var myHostname = window.location.hostname;
+        if (!myHostname) {
+            myHostname = "localhost";
+        }
+
+        function sendToServer(message) {
+            var messageStr = JSON.stringify(message);
+            hubConnection.invoke("Send", messageStr);
+        }
+
+        document.getElementById("startBtn").addEventListener("click", async function (e) {
+            createPeerConnection();
+
+            try {
+                var webcamStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);// || navigator.webkitGetUserMedia(mediaConstraints) || navigator.mozGetUserMedia(mediaConstraints);
+                webcamStream.getTracks().forEach(
+                    transceiver = track => myPeerConnection.addTransceiver(track, { streams: [webcamStream] }));
+            } catch (err) {
+
+            }
+        })
+
+        document.getElementById("stopBtn").addEventListener("click", function (e) {
+            closeVideoCall();
+
+            sendToServer({
+                type: "stop"
+            });
+        })
+
+        async function createPeerConnection() {
+            myPeerConnection = new RTCPeerConnection({
+                iceServers: [
+                    {
+                        urls: "turn:" + myHostname,
+                        username: "webrtc",
+                        credential: "turnserver"
+                    }
+                ]
+            });
+
+            myPeerConnection.onnegotiationneeded = handleNegotiationNeededEvent;
+            myPeerConnection.onicecandidate = handleICECandidateEvent;
+            myPeerConnection.oniceconnectionstatechange = handleICEConnectionStateChangeEvent;
+            myPeerConnection.onsignalingstatechange = handleSignalingStateChangeEvent;
+            myPeerConnection.ontrack = handleTrackEvent;
+        }
+
+        async function handleNegotiationNeededEvent() {
+            try {
+                if (myPeerConnection.signalingState != "stable") {
+                    return;
+                }
+
+                const offer = await myPeerConnection.createOffer();
+                await myPeerConnection.setLocalDescription(offer);
+                sendToServer({
+                    type: "video-offer",
+                    sdp: myPeerConnection.localDescription
+                });
+            } catch (err) {
+                reportError(err);
+            };  
+        }
+
+        function handleICECandidateEvent(event) {
+            if (event.candidate) {
+                sendToServer({
+                    type: "new-ice-candidate",
+                    candidate: event.candidate
+                });
+            }
+        }
+
+        function handleICEConnectionStateChangeEvent(event) {
+            switch (myPeerConnection.iceConnectionState) {
+                case "closed":
+                case "failed":
+                case "disconnected":
+                    closeVideoCall();
+                    break;
+            }
+        }
+
+        function handleSignalingStateChangeEvent(event) {
+            switch (myPeerConnection.signalingState) {
+                case "closed":
+                    closeVideoCall();
+                    break;
+            }
+        }
+
+        function handleTrackEvent(event) {
+            document.getElementById("receivedVideo").srcObject = event.streams[0];
+            document.getElementById("stopBtn").disabled = false;
+        }
+
+        function closeVideoCall() {
+            if (myPeerConnection) {
+                myPeerConnection.ontrack = null;
+                myPeerConnection.onnicecandidate = null;
+                myPeerConnection.oniceconnectionstatechange = null;
+                myPeerConnection.onsignalingstatechange = null;
+                myPeerConnection.onicegatheringstatechange = null;
+                myPeerConnection.onnotificationneeded = null;
+
+                myPeerConnection.getTransceivers().forEach(transceiver => {
+                    transceiver.stop();
+                });
+
+                myPeerConnection.close();
+                myPeerConnection = null;
+            }
+        }
+
+        async function handleVideoOfferMessage(message) {
+            if (!myPeerConnection) {
+                createPeerConnection();
+            }
+
+            
+
+            if (myPeerConnection.signalingState != "stable") {
+                await Promise.all([
+                    myPeerConnection.setLocalDescription({ type: "rollback" }),
+                  //  myPeerConnection.setRemoteDescription(desc)
+                ]);
+                return;
+            } else {
+                var desc = new RTCSessionDescription(message.sdp);
+                await myPeerConnection.setRemoteDescription(desc);
+            }
+
+            try {
+                var webcamStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
+                webcamStream.getTracks().forEach(
+                transceiver = track => myPeerConnection.addTransceiver(track, { streams: [webcamStream] }));
+            } catch (error) {
+                return;
+            }
+
+            await myPeerConnection.setLocalDescription(await myPeerConnection.createAnswer());
+
+            sendToServer({
+                type: "video-answer",
+                sdp: myPeerConnection.localDescription
+            });
+        }
+
+        async function handleVideoAnswerMessage(message) {
+            var desc = new RTCSessionDescription(message.sdp);
+            await myPeerConnection.setRemoteDescription(desc)
+                .catch(reportError);
+        }
+
+        async function handleNewICECandidateMessage(message) {
+            var candidate = new RTCIceCandidate(message.candidate);
+            try {
+                await myPeerConnection.addIceCandidate(candidate)
+            } catch (error) {
+                reportError(error);
+            }
+        }
+
+        function handleStopUpMessage(message) {
+            closeVideoCall();
+        }
+
+        function reportError(error) {
+            console.error(`Error ${error.name}: ${error.message}`);
+        }
+    </script>
+</body>
+</html>
